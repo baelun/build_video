@@ -218,3 +218,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# storybook-video: 製作專案內容（生成素材、執行紀錄）預設不提交
+projects/*
+!projects/.gitkeep
+
+# 公開展示網站的建置輸出（部署到 gh-pages 分支，不放在 main）
+site/
