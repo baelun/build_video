@@ -63,15 +63,17 @@ storybook render lantern
 
 | 指令 | 說明 | 常用選項 |
 |---|---|---|
-| `init STORY_FILE --id ID` | 用故事檔建立專案；角色參考圖會複製到專案內 | `--style` `--aspect-ratio` `--provider mock\|xai` `--characters FILE` |
+| `init STORY_FILE --id ID` | 用故事檔建立專案；角色參考圖會複製到專案內 | `--style` `--aspect-ratio` `--provider mock\|xai` `--characters FILE` `--brief FILE` |
+| `refs ID` | 產生角色、物件與畫風參考圖；畫風先做，其餘以它為輸入 | `-n/--name`（可重複）`--force` `--dry-run` |
 | `plan ID` | 產生分鏡與講稿；已有分鏡時要加 `--force`，舊分鏡會備份到 `history/` | `--force` `--dry-run` |
 | `images ID` | 生成圖片；已有圖片的幕會跳過 | `-s/--scene`（可重複）`--force` `--dry-run` |
-| `edit ID -s SCENE` | 修改一幕；內容有變就讓該幕 revision 加一，並使該幕確認失效 | `--display-text` `--narration` `--audio-mode` `--image-prompt` `--motion-prompt` `--duration` `--character-ref` |
+| `edit ID -s SCENE` | 修改一幕；內容有變就讓該幕 revision 加一，並使該幕確認失效 | `--display-text` `--narration` `--audio-mode` `--sound-prompt` `--image-prompt` `--motion-prompt` `--duration` `--character-ref` |
 | `review ID` | 產生靜態 HTML 預覽頁，顯示圖片、台詞、動作提示、時長與確認狀態 | |
 | `approve ID` | 確認目前 revision；必須指定 `--scene` 或 `--all` | `-s` `--all` `--revoke` |
 | `videos ID` | 為已確認的幕提交影片任務 | `-s` `--force` `--dry-run` |
 | `status ID` | 列出每幕的 revision、圖片、確認、任務與影片狀態 | `--poll` `-s` |
-| `render ID` | 檢查條件後，用 FFmpeg 依序合成當前版本影片，可加背景音樂 | `--bgm FILE` `--bgm-volume 0.18` `--dry-run` |
+| `trim ID -s SCENE` | 設定合成時該幕只用前 N 秒（剪輯用；不重新生成、不影響確認） | `--seconds N` `--clear` |
+| `render ID` | 檢查條件後，用 FFmpeg 依序合成當前版本影片，可加背景音樂與環境音 | `--bgm FILE` `--bgm-volume 0.18` `--ambience FILE` `--ambience-volume 0.5` `--voice-volume 1.0` `--dry-run` |
 | `publish ID...` | 輸出公開展示網站（只含成品） | `--out site` |
 
 也可以用 `python -m storybook_video` 代替 `storybook`。
@@ -131,12 +133,40 @@ projects/lantern/
 - 查詢任務時，會把 xAI 回報的費用（`cost_usd`）寫進 `logs/generation.jsonl`。
 - 圖片和分鏡是同步請求，逾時後重跑可能重複計費（每張 US$0.04）。
 
+## 角色、物件與畫風參考
+
+`--characters` 的 JSON 可以同時描述角色、固定物件與畫風（範例見 [characters.json](examples/little_lantern/characters.json)）：
+
+```json
+[
+  {"name": "畫風", "kind": "style", "reference_prompt": "水彩夜景基調…"},
+  {"name": "少女", "kind": "character", "description": "黑色齊肩髮…", "voice": "輕、低的年輕女聲",
+   "reference_prompt": "全身站姿與臉部特寫並排…"},
+  {"name": "修燈人", "kind": "character", "description": "…", "reference_inputs": ["少女"]},
+  {"name": "玻璃瓶", "kind": "object", "description": "透明圓柱玻璃瓶…", "reference_prompt": "…"}
+]
+```
+
+- `storybook refs ID` 依序產生參考圖，存在 `assets/references/<名稱>/v001.jpg`。畫風先做，角色與物件以畫風參考圖為輸入。
+- `reference_inputs`：額外借用其他角色參考圖的畫法，用來對齊畫風。送出時會標註「只沿用畫法，不是同一個人」。
+- 分鏡時，每幕的 `characters` 會決定要帶哪些參考圖：畫風參考每幕都帶，再加上出場的角色與物件，最多 5 張。生成圖片時會告訴模型每張參考圖代表什麼。
+- 已有分鏡後重做某個參考圖，只有用到它的幕會升 revision、確認失效。
+
+## 創作說明（brief）
+
+`init --brief brief.md` 可以提供情緒方向、視覺設定和分鏡骨架（幕數與順序）。分鏡時會一併交給 LLM，並以它為最高優先。
+
+每幕除了旁白／台詞，還有：
+- `sound_prompt`：聲音設計，例如海浪、風、腳步、雨。
+- `audio_mode=ambient`：只有環境音、沒有人聲。用來保留不說話的鏡頭；和 `none`（完全無聲）不同。
+
 ## 設定
 
 - 環境變數，或寫在 `.env`：`XAI_API_KEY`、`STORYBOOK_PROJECTS_DIR`、`XAI_TEXT_MODEL`、`XAI_IMAGE_MODEL`、`XAI_VIDEO_MODEL`、`XAI_VIDEO_RESOLUTION`。設定後會覆蓋專案的設定值，但不會寫回 `project.json`。
 - 專案層級的設定在 `project.json` 的 `settings`：
   - `provider`、`text_model`、`image_model`、`video_model`、`video_resolution`（480p／720p／1080p）、`default_duration_seconds`、`language`
   - `narration_style`：旁白語氣描述，會寫進影片提示，例如「溫暖的女性說書人，像睡前講童話……」
+  - `dialogue_style`：台詞語氣描述，預設「像童話動畫一樣生動有感情」
 - 角色設定（`--characters` JSON）可以加 `voice`，描述角色說話的聲音，用於對話幕。範例見 [characters.json](examples/little_lantern/characters.json)。
 - 只想改模型時，可以直接改 `project.json` 的 `settings.video_model`，例如改成較便宜的 `grok-imagine-video-1.5-lite`。
 
@@ -158,11 +188,19 @@ python scripts/make_demo_bgm.py projects/lantern-xai/assets/music/musicbox.wav
 
 storybook render lantern-xai                      # 無背景音樂
 storybook render lantern-xai --bgm projects/lantern-xai/assets/music/musicbox.wav --bgm-volume 0.18
+
+# 環境音底（原創合成：sea＝海浪＋風，rain＝雨＋風）
+python scripts/make_ambience.py projects/glass-sea/assets/music/ambience_sea.m4a --preset sea --duration 120
+storybook trim glass-sea -s s03 --seconds 6.5    # 沒講話的幕可以剪短
+storybook render glass-sea --bgm projects/glass-sea/assets/music/musicbox.wav --bgm-volume 0.15 \
+  --ambience projects/glass-sea/assets/music/ambience_sea.m4a --ambience-volume 0.5
 ```
 
 - 各幕先統一成第一幕的解析度、24fps、48kHz 立體聲，再依 `order` 接起來；沒有音軌的幕會補靜音。
 - 整支影片頭尾各有 0.5 秒淡入、1 秒淡出。
 - 背景音樂會循環鋪滿全片、淡入淡出，有人聲時用 sidechain 壓縮自動壓低。整本用同一首曲子，換幕時不會突然換曲。
+- 環境音底（`--ambience`）和背景音樂分開調整音量，有人聲時只稍微讓位。用來補足影片模型在「沒有人聲」的幕只產生極小環境音的問題。
+- `trim` 設定的長度只影響合成：原始影片完整保留，確認狀態也不受影響。
 - 每次合成都另存新檔（`output/story_v001.mp4`、`v002`…），不覆蓋舊檔；預覽頁上方會顯示最新版。
 
 ## 公開展示網站（GitHub Pages）
@@ -203,6 +241,7 @@ src/storybook_video/
     xai.py        xAI REST adapter（httpx）
 scripts/
   make_demo_bgm.py  合成示範用音樂盒背景音樂（只用標準函式庫）
+  make_ambience.py  用 FFmpeg 合成原創環境音底（海浪、風、雨）
 tests/            pytest（全部離線；xAI 測試用 httpx.MockTransport；合成測試需要 ffmpeg，沒有時自動略過）
 examples/         範例故事與角色設定
 ```

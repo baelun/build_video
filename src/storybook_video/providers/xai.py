@@ -120,13 +120,14 @@ def _cost_usd(data: dict) -> float | None:
 
 PLAN_SYSTEM_PROMPT = """你是有聲故事書的分鏡師。把使用者的故事拆成數幕，輸出符合 JSON Schema 的物件。
 規則：
-- 依故事自然段落分幕，不增刪情節；每幕對應一頁。
-- display_text：該頁顯示的故事文字（{language}）。
-- narration_or_dialogue：影片中要說出的{language}旁白或台詞。旁白用 voiceover；角色開口說話用 dialogue（寫成「角色名：台詞」）；無人聲用 none。
-- image_prompt：描述單一靜態畫面，含共用畫風、場景、角色外觀與動作，畫面中不要出現文字。
+- 若有「創作說明」，以它為最高優先：情緒方向、視覺設定、分鏡骨架（幕數與順序）都必須遵守；沒有骨架時依故事自然段落分幕，不增刪情節。
+- display_text：該頁顯示的{language}文字；創作說明要求短句時就寫短句。
+- narration_or_dialogue：影片中要說出的{language}旁白或台詞。旁白用 voiceover；角色開口說話用 dialogue（寫成「角色名：台詞」）；只有環境音、沒有人聲用 ambient（此欄留空）；完全無聲用 none。
+- image_prompt：描述單一靜態畫面，含畫風、場景、構圖、光線、角色外觀與動作；畫面中不要出現任何文字。
 - motion_prompt：描述畫面中的動作與鏡頭運動。
-- duration_seconds：整數，介於 4 到 {max_duration}，要足夠把旁白或台詞說完。
-- characters：本幕出場角色名稱（使用角色設定中的名稱）。"""
+- sound_prompt：聲音設計，例如海浪、風、腳步、雨、環境聲，以及必要的短句台詞。
+- duration_seconds：整數，介於 4 到 {max_duration}；有旁白或台詞時要足夠說完。
+- characters：本幕出場的角色與固定物件名稱，只能使用「角色與物件」清單中的名稱。"""
 
 
 def _strict_schema(schema: dict) -> dict:
@@ -152,11 +153,17 @@ class XAIStoryPlanner(_XAIBase, StoryPlanner):
         system = PLAN_SYSTEM_PROMPT.format(
             language=request.language, max_duration=VIDEO_MAX_DURATION_SECONDS
         )
-        chars = "\n".join(f"- {c.name}：{c.description}" for c in request.characters) or "（未指定，請自行整理）"
+        kinds = {"character": "角色", "object": "物件"}
+        chars = "\n".join(
+            f"- {c.name}（{kinds[c.kind]}）：{c.description}" for c in request.characters if c.kind != "style"
+        ) or "（未指定，請自行整理）"
         user = (
             f"畫風：{request.style or '（未指定，請建議一種適合兒童繪本的畫風）'}\n"
-            f"畫面比例：{request.aspect_ratio}\n角色：\n{chars}\n\n故事：\n{request.story}"
+            f"畫面比例：{request.aspect_ratio}\n角色與物件：\n{chars}\n\n"
         )
+        if request.brief:
+            user += f"創作說明：\n{request.brief}\n\n"
+        user += f"故事：\n{request.story}"
         return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
     def response_schema(self) -> dict:
@@ -204,8 +211,9 @@ class XAIImageGenerator(_XAIBase, ImageGenerator):
             # 角色參考圖：多圖編輯，prompt 中以 <IMAGE_i> 指稱
             refs = request.reference_paths[:5]
             body["images"] = [{"url": _data_url(p)} for p in refs]
-            tags = "、".join(f"<IMAGE_{i}>" for i in range(len(refs)))
-            body["prompt"] = f"以 {tags} 作為角色外觀參考，畫出新的場景：\n{request.prompt}"
+            labels = request.reference_labels or ["角色外觀參考"] * len(refs)
+            legend = "\n".join(f"<IMAGE_{i}>：{labels[i] if i < len(labels) else '參考圖'}" for i in range(len(refs)))
+            body["prompt"] = f"參考圖：\n{legend}\n\n依參考圖畫出新的場景：\n{request.prompt}"
             path = "/images/edits"
         data = self._post(path, body, timeout=180.0)
         try:

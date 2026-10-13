@@ -59,6 +59,7 @@ def init_project(
     aspect_ratio: str = "16:9",
     provider: str = "mock",
     characters: list[Character] | None = None,
+    brief: str = "",
 ) -> Project:
     if not re.fullmatch(r"\d+:\d+", aspect_ratio):
         raise WorkflowError(f"畫面比例格式應為 W:H，例如 16:9；收到 {aspect_ratio!r}")
@@ -70,6 +71,7 @@ def init_project(
         style=style,
         aspect_ratio=aspect_ratio,
         characters=characters or [],
+        brief=brief,
         settings=ProjectSettings(provider=provider),
     )
     store.create(project)
@@ -105,6 +107,7 @@ def plan_story(
         characters=project.characters,
         language=project.settings.language,
         default_duration_seconds=project.settings.default_duration_seconds,
+        brief=project.brief,
     )
     plan = planner.plan(request)
 
@@ -112,12 +115,12 @@ def plan_story(
         backup = store.backup(project)
         store.log(project.project_id, "plan_backup", path=str(backup))
 
-    chars = {c.name: c for c in (project.characters or plan.characters)}
+    known = project.characters or plan.characters
     # 重新分鏡時沿用編號往後排，scene_id 永不重複使用
     ids = _next_scene_numbers(project, len(plan.scenes))
     scenes = []
     for order, (sid, ps) in enumerate(zip(ids, plan.scenes), start=1):
-        refs = [p for name in ps.characters if name in chars for p in chars[name].reference_paths]
+        refs = scene_reference_paths(known, ps.characters)
         scene = Scene(
             scene_id=sid,
             order=order,
@@ -127,6 +130,8 @@ def plan_story(
             image_prompt=ps.image_prompt,
             motion_prompt=ps.motion_prompt,
             duration_seconds=ps.duration_seconds,
+            sound_prompt=ps.sound_prompt,
+            characters=ps.characters,
             character_reference_paths=refs,
         )
         scene.sync_revision()
@@ -144,6 +149,121 @@ def plan_story(
     return scenes
 
 
+def scene_reference_paths(characters: list[Character], names: list[str]) -> list[str]:
+    """一幕要用的參考圖：畫風參考（每幕都帶）在前，接著是出場角色／物件，去除重複。"""
+    by_name = {c.name: c for c in characters}
+    picked = [c for c in characters if c.kind == "style"]
+    picked += [by_name[n] for n in names if n in by_name and by_name[n].kind != "style"]
+    out: list[str] = []
+    for c in picked:
+        for p in c.reference_paths:
+            if p not in out:
+                out.append(p)
+    return out
+
+
+def reference_labels(project: Project, paths: list[str]) -> list[str]:
+    """每張參考圖的說明（例如「少女的外觀」），讓模型知道每張圖代表什麼。"""
+    owner = {p: c for c in project.characters for p in c.reference_paths}
+    labels = []
+    for p in paths:
+        c = owner.get(p)
+        if c is None:
+            labels.append("參考圖")
+        elif c.kind == "style":
+            labels.append("畫風、色調與筆觸的參考（不要沿用其中的構圖或人物）")
+        elif c.kind == "object":
+            labels.append(f"「{c.name}」的外形參考，形狀與比例保持一致")
+        else:
+            labels.append(f"「{c.name}」的長相與服裝參考，臉與服裝保持一致")
+    return labels
+
+
+# ---- 參考圖（角色、物件、畫風） ----
+
+
+def _ref_folder(name: str) -> str:
+    return re.sub(r"[\\/\s]+", "_", name.strip()) or "ref"
+
+
+def build_reference_prompt(project: Project, c: Character) -> str:
+    body = c.reference_prompt or c.description
+    if c.kind == "style":
+        return f"{body}\n畫面中不要出現任何文字。"
+    kind = "角色設定參考圖" if c.kind == "character" else "物件設定參考圖"
+    parts = [f"{kind}：{c.name}"]
+    if project.style:
+        parts.append(f"畫風：{project.style}")
+    parts += [body, "單純背景、主體清楚完整，畫面中不要出現任何文字。"]
+    return "\n".join(parts)
+
+
+def generate_references(
+    store: ProjectStore,
+    project: Project,
+    generator: ImageGenerator,
+    *,
+    names: list[str] | None = None,
+    force: bool = False,
+    dry_run: bool = False,
+) -> list[Outcome]:
+    """為角色／物件／畫風產生參考圖。畫風先做，其餘以畫風參考圖為輸入，確保風格一致。"""
+    if not project.characters:
+        raise WorkflowError("專案沒有角色設定；init 時用 --characters 提供")
+    by_name = {c.name: c for c in project.characters}
+    for n in names or []:
+        if n not in by_name:
+            raise WorkflowError(f"找不到角色／物件：{n}；現有：{', '.join(by_name)}")
+    targets = [c for c in project.characters if not names or c.name in names]
+    targets.sort(key=lambda c: c.kind != "style")
+    outcomes = []
+    for c in targets:
+        if c.reference_paths and not force:
+            outcomes.append(Outcome(c.name, "skipped", "已有參考圖（重做請加 --force）"))
+            continue
+        style_refs = [] if c.kind == "style" else [
+            p for s in project.characters if s.kind == "style" for p in s.reference_paths
+        ]
+        borrowed = [p for n in c.reference_inputs if n in by_name for p in by_name[n].reference_paths]
+        prompt = build_reference_prompt(project, c)
+        if dry_run:
+            outcomes.append(Outcome(c.name, "would_generate", f"{c.kind}，參考 {len(style_refs) + len(borrowed)} 張",
+                                    {"prompt": prompt, "references": style_refs + borrowed}))
+            continue
+        request = ImageRequest(
+            scene_id=c.name,
+            prompt=prompt,
+            aspect_ratio=project.aspect_ratio,
+            reference_paths=[store.resolve(project.project_id, p) for p in style_refs + borrowed],
+            reference_labels=reference_labels(project, style_refs)
+            + ["畫法參考：只沿用這張圖的畫風、線條、五官畫法與上色方式；不是同一個人，不要沿用長相與服裝"] * len(borrowed),
+            caption=c.name,
+        )
+        try:
+            result = generator.generate(request)
+        except CapabilityNotImplementedError:
+            raise
+        except ProviderError as e:
+            store.log(project.project_id, "reference_error", name=c.name, error=str(e))
+            outcomes.append(Outcome(c.name, "error", str(e)))
+            continue
+        rel = store.next_version_path(project.project_id, "references", _ref_folder(c.name), result.suffix)
+        store.write_asset(project.project_id, rel, result.data)
+        c.reference_paths = [rel]
+        store.save(project)
+        store.log(project.project_id, "reference", name=c.name, kind=c.kind, path=rel, mock=result.is_mock)
+        outcomes.append(Outcome(c.name, "generated", rel + ("（MOCK）" if result.is_mock else "")))
+    # 已有分鏡時同步各幕的參考圖；有變動的幕會升 revision、確認失效
+    if not dry_run:
+        for scene in project.scenes:
+            refs = scene_reference_paths(project.characters, scene.characters)
+            if scene.characters and refs != scene.character_reference_paths:
+                scene.apply_changes(character_reference_paths=refs)
+                outcomes.append(Outcome(scene.scene_id, "updated", f"參考圖已更新，revision={scene.revision}"))
+        store.save(project)
+    return outcomes
+
+
 # ---- 圖片 ----
 
 
@@ -151,9 +271,12 @@ def build_image_prompt(project: Project, scene: Scene) -> str:
     parts = []
     if project.style:
         parts.append(f"畫風：{project.style}")
-    present = [c for c in project.characters if c.name in scene.display_text + scene.image_prompt]
+    if scene.characters:
+        present = [c for c in project.characters if c.name in scene.characters and c.kind != "style"]
+    else:
+        present = [c for c in project.characters if c.name in scene.display_text + scene.image_prompt]
     if present:
-        parts.append("角色：" + "；".join(f"{c.name}（{c.description}）" for c in present))
+        parts.append("角色與物件：" + "；".join(f"{c.name}（{c.description}）" for c in present))
     parts.append(scene.image_prompt)
     return "\n".join(parts)
 
@@ -190,6 +313,7 @@ def generate_images(
             prompt=prompt,
             aspect_ratio=project.aspect_ratio,
             reference_paths=[store.resolve(project.project_id, p) for p in scene.character_reference_paths],
+            reference_labels=reference_labels(project, scene.character_reference_paths),
             caption=scene.display_text,
         )
         try:
@@ -287,16 +411,23 @@ def build_video_prompt(project: Project, scene: Scene) -> str:
     lines = [scene.motion_prompt or "鏡頭緩慢推近"]
     speech = scene.narration_or_dialogue.strip()
     lang = LANGUAGE_NAMES.get(project.settings.language, project.settings.language)
-    style = project.settings.narration_style
+    ps = project.settings
     if scene.audio_mode == AudioMode.voiceover and speech:
-        lines.append(f"畫外旁白（{style}），用{lang}逐字念出：「{speech}」")
+        lines.append(f"畫外旁白（{ps.narration_style}），用{lang}逐字念出：「{speech}」")
+        lines.append("畫面中的人物不開口、不說話，嘴巴保持閉合；聲音只來自畫外旁白")
     elif scene.audio_mode == AudioMode.dialogue and speech:
         voices = [f"{c.name}：{c.voice}" for c in project.characters if c.voice and c.name in speech]
         if voices:
             lines.append("角色聲音：" + "；".join(voices))
-        lines.append(f"角色開口說話並對嘴，像童話動畫一樣生動有感情，用{lang}逐字說出以下台詞：\n{speech}")
+        lines.append(f"角色開口說話並對嘴，{ps.dialogue_style}，用{lang}逐字說出以下台詞：\n{speech}")
+    elif scene.audio_mode == AudioMode.ambient:
+        lines.append("沒有旁白、沒有人聲，只有環境音；畫面中的人物不開口、不說話")
+    elif scene.audio_mode == AudioMode.none:
+        lines.append("完全無聲")
     else:
         lines.append("無人聲，只有輕柔環境音")
+    if scene.sound_prompt and scene.audio_mode != AudioMode.none:
+        lines.append(f"聲音設計：{scene.sound_prompt}")
     if project.style:
         lines.append(f"畫風維持：{project.style}")
     return "\n".join(lines)

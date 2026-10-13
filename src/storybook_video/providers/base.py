@@ -39,6 +39,7 @@ class PlanRequest:
     characters: list[Character]
     language: str = "zh-TW"
     default_duration_seconds: float = 6
+    brief: str = ""  # 創作說明（情緒、視覺、分鏡骨架）
 
 
 class StoryPlanner(ABC):
@@ -73,6 +74,7 @@ class ImageRequest:
     prompt: str
     aspect_ratio: str
     reference_paths: list[Path] = field(default_factory=list)
+    reference_labels: list[str] = field(default_factory=list)  # 與 reference_paths 對應的說明
     caption: str = ""  # 僅供 mock 占位圖顯示
 
 

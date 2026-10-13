@@ -28,7 +28,15 @@ dl{margin:0;display:grid;grid-template-columns:7em 1fr;gap:4px 8px}dt{color:var(
 code{background:var(--bg);padding:1px 4px;border-radius:4px}
 .final{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:16px}
 .final video{width:100%;max-width:960px;border-radius:6px;display:block}
+.refs{margin-bottom:16px}.refgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}
+.refgrid figure{margin:0;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px}
+.refgrid img{width:100%;border-radius:6px;display:block}.refgrid figcaption{font-size:13px;color:var(--muted);margin-top:6px}
+.refgrid b{color:var(--fg)}.kind{font-size:12px;border:1px solid var(--line);border-radius:99px;padding:0 6px}
+img.thumb{width:72px;height:auto;border-radius:4px;border:1px solid var(--line);vertical-align:middle;margin:0 4px 4px 0}
 """
+
+AUDIO_LABELS = {"voiceover": "旁白", "dialogue": "台詞（對嘴）", "ambient": "只有環境音", "none": "無聲"}
+KIND_LABELS = {"character": "角色", "object": "物件", "style": "畫風"}
 
 
 def _rel_from_preview(project_dir: Path, rel_asset: str) -> str:
@@ -38,6 +46,14 @@ def _rel_from_preview(project_dir: Path, rel_asset: str) -> str:
 def build_preview(store: ProjectStore, project: Project) -> Path:
     pdir = store.project_dir(project.project_id)
     is_mock = project.settings.provider == "mock"
+    def refs_html(s) -> str:
+        if not s.character_reference_paths:
+            return "—"
+        return " ".join(
+            f'<img class="thumb" src="{escape(_rel_from_preview(pdir, p))}" alt="" title="{escape(p)}">'
+            for p in s.character_reference_paths
+        )
+
     cards = []
     for s in project.ordered_scenes():
         st = scene_status(store, project, s)
@@ -58,12 +74,14 @@ def build_preview(store: ProjectStore, project: Project) -> Path:
     <dl>
       <dt>revision</dt><dd>{s.revision}</dd>
       <dt>頁面文字</dt><dd>{escape(s.display_text)}</dd>
-      <dt>聲音模式</dt><dd>{escape(s.audio_mode.value)}</dd>
-      <dt>旁白／台詞</dt><dd>{escape(s.narration_or_dialogue) or '—'}</dd>
-      <dt>圖片提示</dt><dd>{escape(s.image_prompt)}</dd>
+      <dt>聲音模式</dt><dd>{escape(AUDIO_LABELS.get(s.audio_mode.value, s.audio_mode.value))}</dd>
+      <dt>旁白／台詞</dt><dd>{escape(s.narration_or_dialogue) or '（無人聲）'}</dd>
+      <dt>聲音設計</dt><dd>{escape(s.sound_prompt) or '—'}</dd>
       <dt>動作／鏡頭</dt><dd>{escape(s.motion_prompt) or '—'}</dd>
-      <dt>時長</dt><dd>{s.duration_seconds:g} 秒</dd>
-      <dt>角色參考</dt><dd>{escape(', '.join(s.character_reference_paths)) or '—'}</dd>
+      <dt>預計時長</dt><dd>{s.duration_seconds:g} 秒</dd>
+      <dt>角色／物件</dt><dd>{escape('、'.join(s.characters)) or '—'}</dd>
+      <dt>參考圖</dt><dd>{refs_html(s)}</dd>
+      <dt>圖片提示</dt><dd>{escape(s.image_prompt)}</dd>
       <dt>影片任務</dt><dd>{escape(st['job'])}</dd>
       <dt>影片</dt><dd>{video}</dd>
       <dt>送出的影片提示</dt><dd>{escape(build_video_prompt(project, s))}</dd>
@@ -88,6 +106,18 @@ def build_preview(store: ProjectStore, project: Project) -> Path:
             f'<section class="final"><h2>完整影片</h2>'
             f'<video controls preload="metadata" src="{latest}"></video><p>所有版本：{links}</p></section>'
         )
+    ref_cards = "".join(
+        f'<figure><img src="{escape(_rel_from_preview(pdir, c.reference_paths[0]))}" alt="{escape(c.name)}">'
+        f'<figcaption><b>{escape(c.name)}</b> <span class="kind">{KIND_LABELS[c.kind]}</span><br>{escape(c.description)}</figcaption></figure>'
+        if c.reference_paths else
+        f'<figure><div class="noimg">尚無參考圖</div><figcaption><b>{escape(c.name)}</b> '
+        f'<span class="kind">{KIND_LABELS[c.kind]}</span><br>{escape(c.description)}</figcaption></figure>'
+        for c in project.characters
+    )
+    refs_section = f'<section class="refs"><h2>角色、物件與畫風參考</h2><div class="refgrid">{ref_cards}</div></section>' if ref_cards else ""
+    total = sum(s.duration_seconds for s in project.scenes)
+    pending = sum(1 for s in project.scenes if not s.is_approved)
+    summary = f'<p class="meta">{len(project.scenes)} 幕 · 預計 {total:g} 秒 · 待確認 {pending} 幕</p>' if project.scenes else ""
     title = escape(project.title or project.project_id)
     html = f"""<!doctype html>
 <html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -96,7 +126,9 @@ def build_preview(store: ProjectStore, project: Project) -> Path:
 <h1>{title}</h1>
 <div class="meta">專案 {escape(project.project_id)} · provider {escape(project.settings.provider)} · 比例 {escape(project.aspect_ratio)} · 畫風 {escape(project.style or '—')} · 產生於 {escape(project.updated_at.strftime('%Y-%m-%d %H:%M UTC'))}</div>
 {banner}
+{summary}
 {output_html}
+{refs_section}
 {''.join(cards) or '<p>尚無分鏡，請先執行 plan。</p>'}
 </main></body></html>
 """

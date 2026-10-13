@@ -26,7 +26,8 @@ def utcnow() -> datetime:
 class AudioMode(StrEnum):
     voiceover = "voiceover"  # 畫外旁白
     dialogue = "dialogue"  # 人物台詞／對嘴
-    none = "none"
+    ambient = "ambient"  # 只有環境音（海浪、風、雨…），沒有人聲
+    none = "none"  # 完全無聲
 
 
 class JobStatus(StrEnum):
@@ -77,7 +78,11 @@ CONTENT_FIELDS = (
     "duration_seconds",
     "character_reference_paths",
     "image_path",
+    "sound_prompt",
+    "characters",
 )
+# 後來新增的內容欄位：空值時不納入指紋，舊專案的 revision 與確認狀態不受影響
+OPTIONAL_CONTENT_FIELDS = ("sound_prompt", "characters")
 
 
 class Scene(BaseModel):
@@ -89,10 +94,13 @@ class Scene(BaseModel):
     image_prompt: str
     motion_prompt: str = ""
     duration_seconds: float = Field(default=6, gt=0, le=60)
+    sound_prompt: str = ""  # 環境音與聲音設計：海浪、風、腳步、雨…
+    characters: list[str] = Field(default_factory=list)  # 出場角色／物件名稱
     character_reference_paths: list[str] = Field(default_factory=list)
     image_path: str | None = None
     video_path: str | None = None
     video_revision: int | None = None  # video_path 是用哪個 revision 生成的
+    render_seconds: float | None = Field(default=None, gt=0)  # 合成時只用前 N 秒（剪輯設定，不影響生成與確認）
     revision: int = 1
     content_fingerprint: str | None = None
     approval: Approval = Field(default_factory=Approval)
@@ -103,6 +111,9 @@ class Scene(BaseModel):
 
     def compute_fingerprint(self) -> str:
         data = self.model_dump(mode="json", include=set(CONTENT_FIELDS))
+        for key in OPTIONAL_CONTENT_FIELDS:
+            if not data.get(key):
+                data.pop(key, None)
         raw = json.dumps(data, sort_keys=True, ensure_ascii=False)
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
@@ -159,9 +170,14 @@ class Scene(BaseModel):
 
 
 class Character(BaseModel):
+    """角色、固定物件或畫風參考（kind 區分）。"""
+
     name: str
+    kind: Literal["character", "object", "style"] = "character"
     description: str = ""
     voice: str = ""  # 說話聲音特色，用於 dialogue 幕的影片提示
+    reference_prompt: str = ""  # 生成參考圖用的提示詞（storybook refs）
+    reference_inputs: list[str] = Field(default_factory=list)  # 產生參考圖時，額外借用哪些角色的畫法
     reference_paths: list[str] = Field(default_factory=list)
 
 
@@ -178,6 +194,7 @@ class ProjectSettings(BaseModel):
         "一位溫暖的女性說書人，像睡前講童話給小朋友聽，親切生動、帶著笑意與好奇，"
         "語調起伏明顯，節奏放慢，關鍵詞稍微加重"
     )
+    dialogue_style: str = "像童話動畫一樣生動有感情"
 
 
 class Project(BaseModel):
@@ -187,6 +204,7 @@ class Project(BaseModel):
     source_story: str
     characters: list[Character] = Field(default_factory=list)
     style: str = ""
+    brief: str = ""  # 創作說明：情緒方向、視覺設定、分鏡骨架；分鏡時一併交給 LLM
     aspect_ratio: str = "16:9"
     settings: ProjectSettings = Field(default_factory=ProjectSettings)
     scenes: list[Scene] = Field(default_factory=list)
@@ -219,7 +237,8 @@ class PlannedScene(BaseModel):
     image_prompt: str = Field(min_length=1)
     motion_prompt: str = ""
     duration_seconds: float = Field(default=6, gt=0, le=60)
-    characters: list[str] = Field(default_factory=list, description="出場角色名稱")
+    sound_prompt: str = ""
+    characters: list[str] = Field(default_factory=list, description="出場角色／物件名稱")
 
 
 class StoryPlan(BaseModel):

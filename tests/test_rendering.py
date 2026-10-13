@@ -71,10 +71,12 @@ def test_render_real_clips_with_bgm(tmp_path):
     bgm = tmp_path / "bgm.wav"
     subprocess.run([FFMPEG, "-loglevel", "error", "-f", "lavfi", "-i", "sine=frequency=220:duration=1", str(bgm)], check=True)
 
-    out = render(store, p, plan_render(store, p, bgm=bgm, bgm_volume=0.2))
+    p.get_scene("s01").render_seconds = 1.0  # 1.5 秒的片段只用前 1 秒
+    store.save(p)
+    out = render(store, p, plan_render(store, p, bgm=bgm, bgm_volume=0.2, ambience=bgm, ambience_volume=0.3))
     info = probe(FFMPEG, out)
     assert info.has_audio and (info.width, info.height) == (640, 360)
-    assert info.duration == pytest.approx(3.7, abs=0.2)
+    assert info.duration == pytest.approx(3.2, abs=0.2)
     # 再合成一次會產生新版本，不覆蓋
     out2 = render(store, p, plan_render(store, p))
     assert out2.name == "story_v002.mp4" and out.exists()
@@ -119,3 +121,44 @@ def test_publish_site(tmp_path):
     wf.edit_scene(store, p, "s01", display_text="改過")
     with pytest.raises(PublishError, match="重新 render"):
         publish_site(store, ["pub"], site)
+
+
+def test_filter_with_bgm_and_ambience():
+    f = build_filter([clip(0, 5), clip(1, 7)], bgm_input=2, bgm_volume=0.2, ambience_input=3, ambience_volume=0.4)
+    assert "asplit=3[voice][sc_bg][sc_amb]" in f
+    assert "[3:a:0]" in f and "volume=0.4" in f
+    assert "[bg][sc_bg]sidechaincompress=threshold=0.02:ratio=6" in f
+    assert "[amb][sc_amb]sidechaincompress=threshold=0.02:ratio=2" in f
+    assert "[voice][bgduck][ambduck]amix=inputs=3" in f
+
+
+def test_filter_ambience_only():
+    f = build_filter([clip(0)], ambience_input=1)
+    assert "asplit=2[voice][sc_amb]" in f and "amix=inputs=2" in f and "[bg]" not in f
+
+
+def test_filter_trims_clip():
+    c = clip(0, 4.0)
+    c.trimmed = True
+    f = build_filter([c, clip(1, 3.0, audio=False)])
+    assert "[0:v:0]trim=duration=4.000,setpts=PTS-STARTPTS,scale=" in f
+    assert "[0:a:0]atrim=duration=4.000,asetpts=PTS-STARTPTS," in f
+    assert "[1:v:0]scale=" in f  # 沒剪的幕不加 trim
+
+
+def test_trim_does_not_change_revision(tmp_path):
+    store = ProjectStore(tmp_path)
+    p = wf.init_project(store, "t", "一\n\n二")
+    wf.plan_story(store, p, MockStoryPlanner())
+    wf.generate_images(store, p, MockImageGenerator())
+    wf.approve_scenes(store, p, approve_all=True)
+    p.get_scene("s01").render_seconds = 3
+    store.save(p)
+    p = store.load("t")
+    assert p.get_scene("s01").is_approved and p.get_scene("s01").render_seconds == 3
+
+
+def test_filter_voice_volume():
+    f = build_filter([clip(0)], bgm_input=1, voice_volume=0.7)
+    assert "[acat]volume=0.7,afade=t=in" in f
+    assert "volume=1.0" not in build_filter([clip(0)])

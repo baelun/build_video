@@ -67,7 +67,7 @@ def _print_outcomes(outcomes: list[wf.Outcome], verbose: bool = False) -> None:
     colors = {
         "generated": "green", "submitted": "green", "approved": "green", "completed": "green",
         "skipped": "yellow", "pending": "yellow", "would_generate": "cyan", "would_submit": "cyan",
-        "would_poll": "cyan", "error": "red", "failed": "red", "uncertain": "red",
+        "would_poll": "cyan", "updated": "yellow", "error": "red", "failed": "red", "uncertain": "red",
     }
     if not outcomes:
         typer.echo("（沒有需要處理的幕）")
@@ -94,7 +94,10 @@ def init(
     aspect_ratio: Annotated[str, typer.Option("--aspect-ratio", help="畫面比例，例如 16:9、9:16")] = "16:9",
     provider: Annotated[str, typer.Option(help="mock 或 xai；整個專案沿用")] = "mock",
     characters: Annotated[
-        Optional[Path], typer.Option(exists=True, dir_okay=False, help="角色設定 JSON：[{name, description, reference_paths}]")
+        Optional[Path], typer.Option(exists=True, dir_okay=False, help="角色設定 JSON：[{name, kind, description, reference_prompt, reference_paths}]")
+    ] = None,
+    brief: Annotated[
+        Optional[Path], typer.Option(exists=True, dir_okay=False, help="創作說明（情緒、視覺設定、分鏡骨架），分鏡時交給 LLM")
     ] = None,
 ) -> None:
     """從故事檔建立製作專案。"""
@@ -120,6 +123,7 @@ def init(
     project = wf.init_project(
         store, project_id, story_file.read_text(encoding="utf-8"),
         style=style, aspect_ratio=aspect_ratio, provider=provider, characters=chars,
+        brief=brief.read_text(encoding="utf-8") if brief else "",
     )
     typer.secho(f"已建立專案 {project.project_id}（provider={provider}）：{pdir}", fg="green")
     typer.echo(f"下一步：storybook plan {project_id}")
@@ -155,6 +159,20 @@ def plan(project_id: ProjectArg, force: ForceOpt = False, dry_run: DryRunOpt = F
 
 @app.command()
 @handle_errors
+def refs(
+    project_id: ProjectArg,
+    name: Annotated[Optional[list[str]], typer.Option("--name", "-n", help="只處理指定角色／物件，可重複")] = None,
+    force: ForceOpt = False,
+    dry_run: DryRunOpt = False,
+) -> None:
+    """產生角色、物件與畫風參考圖（畫風先做，其餘以畫風參考圖為輸入）。"""
+    store, project, providers = _load(project_id)
+    outcomes = wf.generate_references(store, project, providers.images, names=name, force=force, dry_run=dry_run)
+    _print_outcomes(outcomes, verbose=dry_run)
+
+
+@app.command()
+@handle_errors
 def images(
     project_id: ProjectArg, scene: ScenesOpt = None, force: ForceOpt = False, dry_run: DryRunOpt = False
 ) -> None:
@@ -171,7 +189,8 @@ def edit(
     scene: Annotated[str, typer.Option("--scene", "-s", help="要修改的幕")],
     display_text: Annotated[Optional[str], typer.Option(help="頁面文字")] = None,
     narration: Annotated[Optional[str], typer.Option(help="旁白或台詞")] = None,
-    audio_mode: Annotated[Optional[AudioMode], typer.Option(help="voiceover / dialogue / none")] = None,
+    audio_mode: Annotated[Optional[AudioMode], typer.Option(help="voiceover / dialogue / ambient / none")] = None,
+    sound_prompt: Annotated[Optional[str], typer.Option(help="聲音設計（海浪、風、腳步、雨…）")] = None,
     image_prompt: Annotated[Optional[str], typer.Option(help="圖片提示詞")] = None,
     motion_prompt: Annotated[Optional[str], typer.Option(help="動作與鏡頭")] = None,
     duration: Annotated[Optional[float], typer.Option(help="時長（秒）")] = None,
@@ -185,7 +204,7 @@ def edit(
         store, project, scene,
         display_text=display_text, narration_or_dialogue=narration, audio_mode=audio_mode,
         image_prompt=image_prompt, motion_prompt=motion_prompt, duration_seconds=duration,
-        character_reference_paths=character_ref,
+        sound_prompt=sound_prompt, character_reference_paths=character_ref,
     )
     s = project.get_scene(scene)
     if changed:
@@ -194,6 +213,28 @@ def edit(
             typer.echo(f"圖片提示已改；如需新圖：storybook images {project_id} -s {scene} --force")
     else:
         typer.echo("內容沒有變化")
+
+
+@app.command()
+@handle_errors
+def trim(
+    project_id: ProjectArg,
+    scene: Annotated[list[str], typer.Option("--scene", "-s", help="要設定的幕，可重複")],
+    seconds: Annotated[Optional[float], typer.Option("--seconds", help="合成時只用前 N 秒")] = None,
+    clear: Annotated[bool, typer.Option("--clear", help="取消剪短，整段使用")] = False,
+) -> None:
+    """設定合成時每幕只用前幾秒（剪輯設定：不重新生成、不影響確認）。"""
+    if (seconds is None) == (not clear):
+        raise wf.WorkflowError("請指定 --seconds N 或 --clear 其中一個")
+    if seconds is not None and seconds <= 0:
+        raise wf.WorkflowError("--seconds 需大於 0")
+    store, project, _ = _load(project_id)
+    for s in project.select_scenes(scene):
+        s.render_seconds = None if clear else seconds
+        typer.echo(f"  {s.scene_id}  合成長度：{'整段' if clear else f'前 {seconds:g} 秒'}")
+    store.save(project)
+    store.log(project_id, "trim", scenes=scene, seconds=None if clear else seconds)
+    typer.echo(f"重新合成後生效：storybook render {project_id} ...")
 
 
 @app.command()
@@ -276,17 +317,27 @@ def render_cmd(
         Optional[Path], typer.Option("--bgm", help="背景音樂檔（mp3/wav 等），循環鋪滿全片，有人聲時自動壓低")
     ] = None,
     bgm_volume: Annotated[float, typer.Option("--bgm-volume", help="背景音樂音量（0–1）")] = 0.18,
+    ambience: Annotated[
+        Optional[Path], typer.Option("--ambience", help="環境音底（海浪、風、雨…），循環鋪滿全片，有人聲時輕微壓低")
+    ] = None,
+    ambience_volume: Annotated[float, typer.Option("--ambience-volume", help="環境音音量（0–1）")] = 0.5,
+    voice_volume: Annotated[float, typer.Option("--voice-volume", help="各幕原聲（旁白、台詞）音量，1 為原音量")] = 1.0,
     dry_run: DryRunOpt = False,
 ) -> None:
     """按順序合成當前版本影片為完整故事影片（需要 FFmpeg 與真實影片）。"""
     store, project, _ = _load(project_id)
     try:
-        rp = plan_render(store, project, bgm=bgm, bgm_volume=bgm_volume)
+        rp = plan_render(store, project, bgm=bgm, bgm_volume=bgm_volume,
+                         ambience=ambience, ambience_volume=ambience_volume, voice_volume=voice_volume)
     except RenderNotReady as e:
         typer.secho(str(e), fg="red", err=True)
         typer.echo(f"ffmpeg：{find_ffmpeg() or '未安裝'}", err=True)
         raise typer.Exit(1)
     music = f"，背景音樂 {rp.bgm}（音量 {rp.bgm_volume}）" if rp.bgm else "，無背景音樂"
+    if rp.ambience:
+        music += f"，環境音 {rp.ambience}（音量 {rp.ambience_volume}）"
+    if rp.voice_volume != 1.0:
+        music += f"，原聲音量 {rp.voice_volume}"
     typer.echo(f"將依序合成 {len(rp.inputs)} 段{music} → {rp.output_rel}")
     if dry_run:
         for p in rp.inputs:
