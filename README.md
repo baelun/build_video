@@ -189,7 +189,7 @@ python scripts/make_demo_bgm.py projects/lantern-xai/assets/music/musicbox.wav
 storybook render lantern-xai                      # 無背景音樂
 storybook render lantern-xai --bgm projects/lantern-xai/assets/music/musicbox.wav --bgm-volume 0.18
 
-# 環境音底（原創合成：sea＝海浪＋風，rain＝雨＋風）
+# 環境音底（原創合成：sea＝海浪＋風，rain＝雨＋風，breeze＝微風＋樹葉）
 python scripts/make_ambience.py projects/glass-sea/assets/music/ambience_sea.m4a --preset sea --duration 120
 storybook trim glass-sea -s s03 --seconds 6.5    # 沒講話的幕可以剪短
 storybook render glass-sea --bgm projects/glass-sea/assets/music/musicbox.wav --bgm-volume 0.15 \

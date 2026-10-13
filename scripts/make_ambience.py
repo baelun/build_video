@@ -6,6 +6,7 @@
 用法：
     python scripts/make_ambience.py projects/<專案>/assets/music/ambience_sea.m4a --preset sea --duration 120
     python scripts/make_ambience.py out.m4a --preset rain
+    python scripts/make_ambience.py out.m4a --preset breeze
 """
 
 from __future__ import annotations
@@ -25,6 +26,13 @@ PRESETS = {
          "0.18+0.82*pow(max(0,sin(2*PI*t/9.3)),2)*(0.75+0.25*sin(2*PI*t/37))", 1.0),
         ("pink", "bandpass=f=520:width_type=o:w=1.6",
          "0.35+0.2*sin(2*PI*t/17)+0.1*sin(2*PI*t/6.1)", 0.35),
+    ],
+    # 微風：柔和的風聲起伏＋細碎的樹葉沙沙聲，適合森林與四季場景
+    "breeze": [
+        ("pink", "bandpass=f=420:width_type=o:w=1.4",
+         "0.35+0.3*pow(max(0,sin(2*PI*t/11.7)),2)+0.12*sin(2*PI*t/4.3)", 0.7),
+        ("white", "highpass=f=2500,lowpass=f=7000",
+         "0.08+0.22*pow(max(0,sin(2*PI*t/11.7+0.6)),3)", 0.3),
     ],
     # 雨：高頻白噪音（雨絲）＋低頻粉紅噪音（遠處雨幕）＋少量風
     "rain": [
